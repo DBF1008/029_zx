@@ -802,18 +802,74 @@ export class ProcessPromise extends Promise<ProcessOutput> {
   async *[Symbol.asyncIterator](): AsyncIterator<string> {
     const memo: (string | undefined)[] = []
     const dlmtr = this._snapshot.delimiter || $.delimiter || DLMTR
+    const store = this._zurk?.store
 
-    for (const chunk of this._zurk!.store.stdout) {
-      yield* getLines(chunk, memo, dlmtr)
+    if (!store) {
+      await this
+      return
     }
 
-    for await (const chunk of this.stdout || []) {
-      yield* getLines(chunk, memo, dlmtr)
+    if (this.output) {
+      for (const chunk of store.stdout) {
+        yield* getLines(chunk, memo, dlmtr)
+      }
+      if (memo[0]) yield memo[0]
+      if (!this.output.ok && !this.isNothrow()) throw this.output
+      return
     }
 
-    if (memo[0]) yield memo[0]
+    const { ee } = this._snapshot
+    let storeIdx = 0
+    const queue: (Buffer | string)[] = []
+    let done = false
+    let notify: (() => void) | null = null
 
-    await this
+    const signal = () => { if (notify) { notify(); notify = null } }
+    const drainStore = () => {
+      while (storeIdx < store.stdout.length) {
+        queue.push(store.stdout[storeIdx++] as string | Buffer)
+      }
+      signal()
+    }
+    const onStdout = () => drainStore()
+    const onEnd = () => { done = true; drainStore(); signal() }
+    const onFirstStdout = () => {
+      drainStore()
+      ee.on('stdout', onStdout)
+    }
+
+    ee.once('stdout', onFirstStdout)
+    ee.once('end', onEnd)
+
+    if (this.output) {
+      ee.removeListener('stdout', onFirstStdout)
+      ee.removeListener('end', onEnd)
+      for (const chunk of store.stdout) {
+        yield* getLines(chunk, memo, dlmtr)
+      }
+      if (memo[0]) yield memo[0]
+      if (!this.output.ok && !this.isNothrow()) throw this.output
+      return
+    }
+
+    try {
+      while (!done || queue.length > 0) {
+        if (queue.length === 0) {
+          await new Promise<void>(r => { notify = r })
+          continue
+        }
+        while (queue.length > 0) {
+          yield* getLines(queue.shift()!, memo, dlmtr)
+        }
+      }
+
+      if (memo[0]) yield memo[0]
+      await this
+    } finally {
+      ee.removeListener('stdout', onFirstStdout)
+      ee.removeListener('stdout', onStdout)
+      ee.removeListener('end', onEnd)
+    }
   }
 
   // Stream-like API

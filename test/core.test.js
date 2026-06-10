@@ -1329,6 +1329,105 @@ describe('core', () => {
         }
         assert.deepEqual(lines.sort(), ['./bar', './baz', './foo'])
       })
+
+      it('should handle delayed iteration without data loss or duplication', async () => {
+        const p = $`echo Line1; sleep 0.05; echo Line2; sleep 0.05; echo Line3`
+        await sleep(80)
+        const lines = []
+        for await (const line of p) {
+          lines.push(line)
+        }
+        assert.deepEqual(lines, ['Line1', 'Line2', 'Line3'])
+      })
+
+      it('should iterate correctly after process has fully completed', async () => {
+        const p = $`echo Line1; echo Line2; echo Line3`
+        await p
+        const lines = []
+        for await (const line of p) {
+          lines.push(line)
+        }
+        assert.deepEqual(lines, ['Line1', 'Line2', 'Line3'])
+      })
+
+      it('should coexist with pipe without data loss', async () => {
+        const p = $`echo Line1; sleep 0.05; echo Line2; sleep 0.05; echo Line3`
+        const piped = p.pipe`cat`
+
+        const lines = []
+        for await (const line of p) {
+          lines.push(line)
+        }
+
+        assert.deepEqual(lines, ['Line1', 'Line2', 'Line3'])
+        assert.equal((await piped).stdout, 'Line1\nLine2\nLine3\n')
+      })
+
+      it('should yield all output lines before throwing on non-zero exit', async () => {
+        const p = $`echo foo; echo bar; exit 1`
+        const lines = []
+        let caughtError = null
+        try {
+          for await (const line of p) {
+            lines.push(line)
+          }
+        } catch (err) {
+          caughtError = err
+        }
+        assert.deepEqual(lines, ['foo', 'bar'])
+        assert.ok(caughtError)
+        assert.equal(caughtError.exitCode, 1)
+      })
+
+      it('should not throw on non-zero exit when nothrow is set', async () => {
+        const p = $({ nothrow: true })`echo foo; echo bar; exit 1`
+        const lines = []
+        for await (const line of p) {
+          lines.push(line)
+        }
+        assert.deepEqual(lines, ['foo', 'bar'])
+      })
+
+      it('should split on custom string delimiter', async () => {
+        const lines = []
+        for await (const line of $({ delimiter: ',' })`echo -n "a,b,c"`) {
+          lines.push(line)
+        }
+        assert.deepEqual(lines, ['a', 'b', 'c'])
+      })
+
+      it('should handle early break from consumer cleanly', async () => {
+        const p = $`echo Line1; echo Line2; echo Line3; echo Line4; echo Line5`
+        const lines = []
+        for await (const line of p) {
+          lines.push(line)
+          if (lines.length >= 2) break
+        }
+        assert.equal(lines.length, 2)
+        assert.equal(lines[0], 'Line1')
+        assert.equal(lines[1], 'Line2')
+        await p
+      })
+
+      it('should support multiple independent iterators', async () => {
+        const p = $`echo A; sleep 0.05; echo B; sleep 0.05; echo C`
+
+        const lines1 = []
+        const lines2 = []
+
+        const iter1 = (async () => {
+          for await (const line of p) lines1.push(line)
+        })()
+
+        await sleep(30)
+        const iter2 = (async () => {
+          for await (const line of p) lines2.push(line)
+        })()
+
+        await Promise.all([iter1, iter2])
+        assert.deepEqual(lines1, ['A', 'B', 'C'])
+        assert.deepEqual(lines2, ['A', 'B', 'C'])
+      })
     })
 
     test('quiet() mode is working', async () => {
