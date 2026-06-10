@@ -33,7 +33,7 @@ import {
 } from './index.ts'
 import { installDeps, parseDeps } from './deps.ts'
 import { startRepl } from './repl.ts'
-import { randomId } from './util.ts'
+import { randomId, once } from './util.ts'
 import { transformMarkdown } from './md.ts'
 import { createRequire, type minimist } from './vendor.ts'
 
@@ -146,10 +146,20 @@ async function runScript(
   tempPath: string
 ): Promise<void> {
   let nmLink = ''
-  const rmTemp = () => {
+  let nmInstall = ''
+
+  const rmTemp = once(() => {
     rmrf(tempPath)
     rmrf(nmLink)
+    rmrf(nmInstall)
+  })
+
+  const onSignal = (sig: NodeJS.Signals) => {
+    rmTemp()
+    process.removeListener(sig, onSignal)
+    process.kill(process.pid, sig)
   }
+
   try {
     if (tempPath) {
       scriptPath = tempPath
@@ -160,16 +170,24 @@ async function runScript(
       nmLink = linkNodeModules(cwd, argv.preferLocal)
     }
     if (argv.install) {
+      const nmPath = path.resolve(cwd, 'node_modules')
+      const nmExisted = !!lstat(nmPath)
       await installDeps(parseDeps(script), cwd, argv.registry)
+      if (!nmExisted) nmInstall = nmPath
     }
 
     injectGlobalRequire(scriptPath)
     process.once('exit', rmTemp)
+    process.once('SIGINT', onSignal)
+    process.once('SIGTERM', onSignal)
 
     // TODO: fix unanalyzable-dynamic-import to work correctly with jsr.io
     await import(url.pathToFileURL(scriptPath).toString())
   } finally {
     rmTemp()
+    process.removeListener('exit', rmTemp)
+    process.removeListener('SIGINT', onSignal)
+    process.removeListener('SIGTERM', onSignal)
   }
 }
 
@@ -189,7 +207,14 @@ function linkNodeModules(cwd: string, external: string): string {
     )
   if (aliasStat?.isDirectory() && alias !== target)
     throw new Fail(`Can't link node_modules: ${alias} already exists`)
-  if (aliasStat) return ''
+
+  if (aliasStat?.isSymbolicLink()) {
+    const resolvedExisting = path.resolve(cwd, fs.readlinkSync(alias))
+    if (resolvedExisting === target) return alias
+    fs.unlinkSync(alias)
+  } else if (aliasStat) {
+    return ''
+  }
 
   fs.symlinkSync(target, alias, 'junction')
   return alias

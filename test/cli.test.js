@@ -268,6 +268,118 @@ console.log(a);
         /node_modules doesn't exist or is not a directory/
       )
     })
+
+    test('replaces stale symlink', async () => {
+      const cwd = tmpdir()
+      const external1 = tmpdir()
+      const external2 = tmpdir()
+      await fs.outputFile(
+        path.join(external1, 'node_modules/a/index.js'),
+        pkgIndex
+      )
+      await fs.outputJson(
+        path.join(external1, 'node_modules/a/package.json'),
+        pkgJson
+      )
+      await fs.outputFile(
+        path.join(external2, 'node_modules/a/index.js'),
+        pkgIndex
+      )
+      await fs.outputJson(
+        path.join(external2, 'node_modules/a/package.json'),
+        pkgJson
+      )
+
+      fs.symlinkSync(
+        path.join(external1, 'node_modules'),
+        path.join(cwd, 'node_modules'),
+        'junction'
+      )
+
+      const out =
+        await $`node build/cli.js --cwd=${cwd} --prefer-local=${external2} <<< ${script}`
+      assert.equal(out.stdout, 'AAA\n')
+      assert.ok(!fs.existsSync(path.join(cwd, 'node_modules')))
+    })
+
+    test('reuses matching symlink and cleans up', async () => {
+      const cwd = tmpdir()
+      const external = tmpdir()
+      await fs.outputFile(
+        path.join(external, 'node_modules/a/index.js'),
+        pkgIndex
+      )
+      await fs.outputJson(
+        path.join(external, 'node_modules/a/package.json'),
+        pkgJson
+      )
+
+      fs.symlinkSync(
+        path.join(external, 'node_modules'),
+        path.join(cwd, 'node_modules'),
+        'junction'
+      )
+
+      const out =
+        await $`node build/cli.js --cwd=${cwd} --prefer-local=${external} <<< ${script}`
+      assert.equal(out.stdout, 'AAA\n')
+      assert.ok(!fs.existsSync(path.join(cwd, 'node_modules')))
+    })
+
+    test('cleans up on script error', async () => {
+      const cwd = tmpdir()
+      const external = tmpdir()
+      await fs.outputFile(
+        path.join(external, 'node_modules/a/index.js'),
+        pkgIndex
+      )
+      await fs.outputJson(
+        path.join(external, 'node_modules/a/package.json'),
+        pkgJson
+      )
+
+      const badScript = `
+import {a} from 'a'
+throw new Error('intentional failure')
+`
+      await $`node build/cli.js --cwd=${cwd} --prefer-local=${external} <<< ${badScript}`.nothrow()
+      assert.ok(!fs.existsSync(path.join(cwd, 'node_modules')))
+    })
+
+    test('cleans up on SIGTERM', async () => {
+      const cwd = tmpdir()
+      const external = tmpdir()
+      await fs.outputFile(
+        path.join(external, 'node_modules/a/index.js'),
+        pkgIndex
+      )
+      await fs.outputJson(
+        path.join(external, 'node_modules/a/package.json'),
+        pkgJson
+      )
+
+      const longScript = `
+import {a} from 'a'
+await new Promise(r => setTimeout(r, 30000))
+`
+      const p =
+        $`node build/cli.js --cwd=${cwd} --prefer-local=${external} <<< ${longScript}`.nothrow()
+      await new Promise((r) => setTimeout(r, 1000))
+      p.kill('SIGTERM')
+      await p
+      assert.ok(!fs.existsSync(path.join(cwd, 'node_modules')))
+    })
+  })
+
+  test('--install preserves pre-existing node_modules', async () => {
+    const cwd = tmpdir()
+    const nmDir = path.join(cwd, 'node_modules', 'user-pkg')
+    await fs.outputFile(path.join(nmDir, 'index.js'), 'module.exports = 42')
+
+    const installScript = `console.log('ok')\n`
+    await $`node build/cli.js --cwd=${cwd} --install <<< ${installScript}`.nothrow()
+
+    assert.ok(fs.existsSync(path.join(nmDir, 'index.js')))
   })
 
   test('scripts from https 200', async () => {
